@@ -1,107 +1,44 @@
 import os
 import numpy as np
 from PIL import Image
-import scipy, scipy.io
-from easydict import EasyDict
+import scipy
+import scipy.io
 from collections import OrderedDict
 from torch.utils.data import Dataset
 from torchvision import datasets, transforms
+from dataclasses import dataclass
+
+
+@dataclass
+class DatasetMetadata:
+    image_size: int
+    num_classes: int
+    train_images: int
+    val_images: int
+    num_channels: int
 
 
 def get_metadata(name):
     if name == "mnist":
-        metadata = EasyDict(
-            {
-                "image_size": 28,
-                "num_classes": 10,
-                "train_images": 60000,
-                "val_images": 10000,
-                "num_channels": 1,
-            }
-        )
+        return DatasetMetadata(28, 10, 60000, 10000, 1)
     elif name == "mnist_m":
-        metadata = EasyDict(
-            {
-                "image_size": 28,
-                "num_classes": 10,
-                "train_images": 60000,
-                "val_images": 10000,
-                "num_channels": 3,
-            }
-        )
+        return DatasetMetadata(28, 10, 60000, 10000, 3)
     elif name == "cifar10":
-        metadata = EasyDict(
-            {
-                "image_size": 32,
-                "num_classes": 10,
-                "train_images": 50000,
-                "val_images": 10000,
-                "num_channels": 3,
-            }
-        )
+        return DatasetMetadata(32, 10, 50000, 10000, 3)
     elif name == "melanoma":
-        metadata = EasyDict(
-            {
-                "image_size": 64,
-                "num_classes": 2,
-                "train_images": 33126,
-                "val_images": 0,
-                "num_channels": 3,
-            }
-        )
+        return DatasetMetadata(64, 2, 33126, 0, 3)
     elif name == "afhq":
-        metadata = EasyDict(
-            {
-                "image_size": 64,
-                "num_classes": 3,
-                "train_images": 14630,
-                "val_images": 1500,
-                "num_channels": 3,
-            }
-        )
+        return DatasetMetadata(64, 3, 14630, 1500, 3)
     elif name == "celeba":
-        metadata = EasyDict(
-            {
-                "image_size": 64,
-                "num_classes": 4,
-                "train_images": 109036,
-                "val_images": 12376,
-                "num_channels": 3,
-            }
-        )
+        return DatasetMetadata(64, 4, 109036, 12376, 3)
     elif name == "cars":
-        metadata = EasyDict(
-            {
-                "image_size": 64,
-                "num_classes": 196,
-                "train_images": 8144,
-                "val_images": 8041,
-                "num_channels": 3,
-            }
-        )
+        return DatasetMetadata(64, 196, 8144, 8041, 3)
     elif name == "flowers":
-        metadata = EasyDict(
-            {
-                "image_size": 64,
-                "num_classes": 102,
-                "train_images": 2040,
-                "val_images": 6149,
-                "num_channels": 3,
-            }
-        )
+        return DatasetMetadata(64, 102, 2040, 6149, 3)
     elif name == "gtsrb":
-        metadata = EasyDict(
-            {
-                "image_size": 32,
-                "num_classes": 43,
-                "train_images": 39252,
-                "val_images": 12631,
-                "num_channels": 3,
-            }
-        )
+        return DatasetMetadata(32, 43, 39252, 12631, 3)
     else:
         raise ValueError(f"{name} dataset nor supported!")
-    return metadata
 
 
 class oxford_flowers_dataset(Dataset):

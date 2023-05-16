@@ -1,8 +1,8 @@
+import typing as t
 import os
 import cv2
 import copy
 import math
-import argparse
 import numpy as np
 from time import time
 from tqdm import tqdm
@@ -13,15 +13,19 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
+from arguments import Arguments
 
 from data import get_metadata, get_dataset, fix_legacy_dict
 import unets
 
-unsqueeze3x = lambda x: x[..., None, None, None]
+
+def unsqueeze3x(x):
+    return x[..., None, None, None]
 
 
-class GuassianDiffusion:
-    """Gaussian diffusion process with 1) Cosine schedule for beta values (https://arxiv.org/abs/2102.09672)
+class GaussianDiffusion:
+    """Gaussian diffusion process with 1) Cosine schedule for beta values
+    (https://arxiv.org/abs/2102.09672)
     2) L_simple training objective from https://arxiv.org/abs/2006.11239.
     """
 
@@ -58,7 +62,8 @@ class GuassianDiffusion:
 
     def get_all_scalars(self, alpha_bar_scheduler, timesteps, device, betas=None):
         """
-        Using alpha_bar_scheduler, get values of all scalars, such as beta, beta_hat, alpha, alpha_hat, etc.
+        Using alpha_bar_scheduler, get values of all scalars, such as beta,
+        beta_hat, alpha, alpha_hat, etc.
         """
         all_scalars = {}
         if betas is None:
@@ -93,7 +98,8 @@ class GuassianDiffusion:
 
     def sample_from_forward_process(self, x0, t):
         """Single step of the forward process, where we add noise in the image.
-        Note that we will use this paritcular realization of noise vector (eps) in training.
+        Note that we will use this paritcular realization of noise vector (eps)
+        in training.
         """
         eps = torch.randn_like(x0)
         xt = (
@@ -111,9 +117,10 @@ class GuassianDiffusion:
         xT: Starting noise vector.
         timesteps: Number of sampling steps (can be smaller the default,
             i.e., timesteps in the diffusion process).
-        model_kwargs: Additional kwargs for model (using it to feed class label for conditioning)
-        ddim: Use ddim sampling (https://arxiv.org/abs/2010.02502). With very small number of
-            sampling steps, use ddim sampling for better image quality.
+        model_kwargs: Additional kwargs for model (using it to feed class label
+                      for conditioning)
+        ddim: Use ddim sampling (https://arxiv.org/abs/2010.02502). With very
+            small number of sampling steps, use ddim sampling for better image quality.
 
         Return: An image tensor with identical shape as XT.
         """
@@ -133,12 +140,13 @@ class GuassianDiffusion:
             self.alpha_bar_scheduler, timesteps, self.device, new_betas
         )
 
-        for i, t in zip(np.arange(timesteps)[::-1], new_timesteps[::-1]):
+        for i, j in zip(np.arange(timesteps)[::-1], new_timesteps[::-1]):
             with torch.no_grad():
-                current_t = torch.tensor([t] * len(final), device=final.device)
+                current_t = torch.tensor([j] * len(final), device=final.device)
                 current_sub_t = torch.tensor([i] * len(final), device=final.device)
                 pred_epsilon = model(final, current_t, **model_kwargs)
-                # using xt+x0 to derive mu_t, instead of using xt+eps (former is more stable)
+                # using xt+x0 to derive mu_t, instead of using xt+eps
+                # (former is more stable)
                 pred_x0 = self.get_x0_from_xt_eps(
                     final, pred_epsilon, current_sub_t, scalars
                 )
@@ -182,19 +190,14 @@ class loss_logger:
 
         if display:
             print(
-                f"Steps: {len(self.loss)}/{self.max_steps} \t loss (ema): {self.ema_loss:.3f} "
+                f"Steps: {len(self.loss)}/{self.max_steps}"
+                + f"\t loss (ema): {self.ema_loss:.3f}"
                 + f"\t Time elapsed: {(time() - self.start_time)/3600:.3f} hr"
             )
 
 
 def train_one_epoch(
-    model,
-    dataloader,
-    diffusion,
-    optimizer,
-    logger,
-    lrs,
-    args,
+    model, dataloader, diffusion, optimizer, logger, lrs, args, ema_state_dict
 ):
     model.train()
     for step, (images, labels) in enumerate(dataloader):
@@ -221,24 +224,24 @@ def train_one_epoch(
         # update ema_dict
         if args.local_rank == 0:
             new_dict = model.state_dict()
-            for (k, v) in args.ema_dict.items():
-                args.ema_dict[k] = (
-                    args.ema_w * args.ema_dict[k] + (1 - args.ema_w) * new_dict[k]
+            for k, v in ema_state_dict.items():
+                ema_state_dict[k] = (
+                    args.ema_w * ema_state_dict[k] + (1 - args.ema_w) * new_dict[k]
                 )
             logger.log(loss.item(), display=not step % 100)
 
 
 def sample_N_images(
-    N,
-    model,
-    diffusion,
-    xT=None,
-    sampling_steps=250,
-    batch_size=64,
-    num_channels=3,
-    image_size=32,
-    num_classes=None,
-    args=None,
+    N: int,
+    model: torch.nn.Module,
+    diffusion: GaussianDiffusion,
+    args: Arguments,
+    xT: t.Optional[torch.Tensor] = None,
+    sampling_steps: int = 250,
+    batch_size: int = 64,
+    num_channels: int = 3,
+    image_size: int = 32,
+    num_classes: t.Optional[int] = None,
 ):
     """use this function to sample any number of images from a given
         diffusion model and diffusion process.
@@ -252,13 +255,19 @@ def sample_N_images(
         batch_size : Batch-size for sampling.
         num_channels : Number of channels in the image.
         image_size : Image size (assuming square images).
-        num_classes : Number of classes in the dataset (needed for class-conditioned models)
+        num_classes : Number of classes in the dataset (needed for
+                     class-conditioned models)
         args : All args from the argparser.
 
     Returns: Numpy array with N images and corresponding labels.
     """
     samples, labels, num_samples = [], [], 0
-    num_processes, group = dist.get_world_size(), dist.group.WORLD
+
+    num_processes = 1
+    group = None
+    if args.local_rank > 0:
+        num_processes, group = dist.get_world_size(), dist.group.WORLD
+
     with tqdm(total=math.ceil(N / (args.batch_size * num_processes))) as pbar:
         while num_samples < N:
             if xT is None:
@@ -279,10 +288,19 @@ def sample_N_images(
             samples_list = [torch.zeros_like(gen_images) for _ in range(num_processes)]
             if args.class_cond:
                 labels_list = [torch.zeros_like(y) for _ in range(num_processes)]
-                dist.all_gather(labels_list, y, group)
-                labels.append(torch.cat(labels_list).detach().cpu().numpy())
 
-            dist.all_gather(samples_list, gen_images, group)
+                if group is None:
+                    labels_list = [y]
+                    labels.append(y.detach().cpu().numpy())
+                else:
+                    dist.all_gather(labels_list, y, group)
+                    labels.append(torch.cat(labels_list).detach().cpu().numpy())
+
+            if group is None:
+                samples_list = [gen_images]
+            else:
+                dist.all_gather(samples_list, gen_images, group)
+
             samples.append(torch.cat(samples_list).detach().cpu().numpy())
             num_samples += len(xT) * num_processes
             pbar.update(1)
@@ -292,69 +310,13 @@ def sample_N_images(
 
 
 def main():
-    parser = argparse.ArgumentParser("Minimal implementation of diffusion models")
-    # diffusion model
-    parser.add_argument("--arch", type=str, help="Neural network architecture")
-    parser.add_argument(
-        "--class-cond",
-        action="store_true",
-        default=False,
-        help="train class-conditioned diffusion model",
-    )
-    parser.add_argument(
-        "--diffusion-steps",
-        type=int,
-        default=1000,
-        help="Number of timesteps in diffusion process",
-    )
-    parser.add_argument(
-        "--sampling-steps",
-        type=int,
-        default=250,
-        help="Number of timesteps in diffusion process",
-    )
-    parser.add_argument(
-        "--ddim",
-        action="store_true",
-        default=False,
-        help="Sampling using DDIM update step",
-    )
-    # dataset
-    parser.add_argument("--dataset", type=str)
-    parser.add_argument("--data-dir", type=str, default="./dataset/")
-    # optimizer
-    parser.add_argument(
-        "--batch-size", type=int, default=128, help="batch-size per gpu"
-    )
-    parser.add_argument("--lr", type=float, default=0.0001)
-    parser.add_argument("--epochs", type=int, default=500)
-    parser.add_argument("--ema_w", type=float, default=0.9995)
-    # sampling/finetuning
-    parser.add_argument("--pretrained-ckpt", type=str, help="Pretrained model ckpt")
-    parser.add_argument("--delete-keys", nargs="+", help="Pretrained model ckpt")
-    parser.add_argument(
-        "--sampling-only",
-        action="store_true",
-        default=False,
-        help="No training, just sample images (will save them in --save-dir)",
-    )
-    parser.add_argument(
-        "--num-sampled-images",
-        type=int,
-        default=50000,
-        help="Number of images required to sample from the model",
-    )
+    args = Arguments().parse_args()
 
-    # misc
-    parser.add_argument("--save-dir", type=str, default="./trained_models/")
-    parser.add_argument("--local_rank", default=0, type=int)
-    parser.add_argument("--seed", default=112233, type=int)
-
-    # setup
-    args = parser.parse_args()
     metadata = get_metadata(args.dataset)
     torch.backends.cudnn.benchmark = True
-    args.device = "cuda:{}".format(args.local_rank)
+
+    args.device = args.device or "cuda:{}".format(args.local_rank)
+
     torch.cuda.set_device(args.device)
     torch.manual_seed(args.seed + args.local_rank)
     np.random.seed(args.seed + args.local_rank)
@@ -370,9 +332,10 @@ def main():
     ).to(args.device)
     if args.local_rank == 0:
         print(
-            "We are assuming that model input/ouput pixel range is [-1, 1]. Please adhere to it."
+            "We are assuming that model input/ouput pixel range is [-1, 1]. "
+            + "Please adhere to it."
         )
-    diffusion = GuassianDiffusion(args.diffusion_steps, args.device)
+    diffusion = GaussianDiffusion(args.diffusion_steps, args.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     # load pre-trained model
@@ -383,13 +346,13 @@ def main():
         if args.delete_keys:
             for k in args.delete_keys:
                 print(
-                    f"Deleting key {k} becuase its shape in ckpt ({d[k].shape}) doesn't match "
-                    + f"with shape in model ({dm[k].shape})"
+                    f"Deleting key {k} becuase its shape in ckpt ({d[k].shape}) "
+                    + f"doesn't match with shape in model ({dm[k].shape})"
                 )
                 del d[k]
         model.load_state_dict(d, strict=False)
         print(
-            f"Mismatched keys in ckpt and model: ",
+            "Mismatched keys in ckpt and model: ",
             set(d.keys()) ^ set(dm.keys()),
         )
         print(f"Loaded pretrained model from {args.pretrained_ckpt}")
@@ -409,18 +372,20 @@ def main():
             args.num_sampled_images,
             model,
             diffusion,
+            args,
             None,
             args.sampling_steps,
             args.batch_size,
             metadata.num_channels,
             metadata.image_size,
             metadata.num_classes,
-            args,
         )
         np.savez(
             os.path.join(
-                args.save_dir,
-                f"{args.arch}_{args.dataset}-{args.sampling_steps}-sampling_steps-{len(sampled_images)}_images-class_condn_{args.class_cond}.npz",
+                args.save_samples,
+                f"{args.arch}_{args.dataset}-{args.sampling_steps}"
+                + f"-sampling_steps-{len(sampled_images)}_images"
+                + f"-class_condn_{args.class_cond}.npz",
             ),
             sampled_images,
             labels,
@@ -440,36 +405,48 @@ def main():
     )
     if args.local_rank == 0:
         print(
-            f"Training dataset loaded: Number of batches: {len(train_loader)}, Number of images: {len(train_set)}"
+            f"Training dataset loaded: Number of batches: {len(train_loader)}, "
+            + f"Number of images: {len(train_set)}"
         )
     logger = loss_logger(len(train_loader) * args.epochs)
 
     # ema model
-    args.ema_dict = copy.deepcopy(model.state_dict())
+    ema_state_dict = copy.deepcopy(model.state_dict())
 
     # lets start training the model
     for epoch in range(args.epochs):
         if sampler is not None:
             sampler.set_epoch(epoch)
-        train_one_epoch(model, train_loader, diffusion, optimizer, logger, None, args)
+        train_one_epoch(
+            model,
+            train_loader,
+            diffusion,
+            optimizer,
+            logger,
+            None,
+            args,
+            ema_state_dict,
+        )
         if not epoch % 1:
             sampled_images, _ = sample_N_images(
                 64,
                 model,
                 diffusion,
+                args,
                 None,
                 args.sampling_steps,
                 args.batch_size,
                 metadata.num_channels,
                 metadata.image_size,
                 metadata.num_classes,
-                args,
             )
             if args.local_rank == 0:
                 cv2.imwrite(
                     os.path.join(
-                        args.save_dir,
-                        f"{args.arch}_{args.dataset}-{args.diffusion_steps}_steps-{args.sampling_steps}-sampling_steps-class_condn_{args.class_cond}.png",
+                        args.save_samples,
+                        f"{args.arch}_{args.dataset}-{args.diffusion_steps}"
+                        + f"_steps-{args.sampling_steps}-sampling_steps-"
+                        + "class_condn_{args.class_cond}.png",
                     ),
                     np.concatenate(sampled_images, axis=1)[:, :, ::-1],
                 )
@@ -477,15 +454,19 @@ def main():
             torch.save(
                 model.state_dict(),
                 os.path.join(
-                    args.save_dir,
-                    f"{args.arch}_{args.dataset}-epoch_{args.epochs}-timesteps_{args.diffusion_steps}-class_condn_{args.class_cond}.pt",
+                    args.save_samples,
+                    f"{args.arch}_{args.dataset}-epoch_{args.epochs}-"
+                    + f"timesteps_{args.diffusion_steps}-class_condn_"
+                    + f"{args.class_cond}.pt",
                 ),
             )
             torch.save(
-                args.ema_dict,
+                ema_state_dict,
                 os.path.join(
-                    args.save_dir,
-                    f"{args.arch}_{args.dataset}-epoch_{args.epochs}-timesteps_{args.diffusion_steps}-class_condn_{args.class_cond}_ema_{args.ema_w}.pt",
+                    args.save_checkpoints,
+                    f"{args.arch}_{args.dataset}-epoch_{args.epochs}-timesteps_"
+                    + f"{args.diffusion_steps}-class_condn_{args.class_cond}_"
+                    + f"ema_{args.ema_w}.pt",
                 ),
             )
 
