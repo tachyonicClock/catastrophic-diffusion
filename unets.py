@@ -6,6 +6,8 @@ import numpy as np
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
+import typing as t
+from torch import Tensor
 
 
 class GroupNorm32(nn.GroupNorm):
@@ -162,7 +164,7 @@ class AttentionPool2d(nn.Module):
     ):
         super().__init__()
         self.positional_embedding = nn.Parameter(
-            th.randn(embed_dim, spacial_dim ** 2 + 1) / embed_dim ** 0.5
+            th.randn(embed_dim, spacial_dim**2 + 1) / embed_dim**0.5
         )
         self.qkv_proj = conv_nd(1, embed_dim, 3 * embed_dim, 1)
         self.c_proj = conv_nd(1, embed_dim, output_dim or embed_dim, 1)
@@ -448,7 +450,7 @@ def count_flops_attn(model, _x, y):
     # We perform two matmuls with the same number of ops.
     # The first computes the weight matrix, the second computes
     # the combination of the value vectors.
-    matmul_ops = 2 * b * (num_spatial ** 2) * c
+    matmul_ops = 2 * b * (num_spatial**2) * c
     model.total_ops += th.DoubleTensor([matmul_ops])
 
 
@@ -741,7 +743,13 @@ class UNetModel(nn.Module):
             zero_module(conv_nd(dims, input_ch, out_channels, 3, padding=1)),
         )
 
-    def forward(self, x, timesteps, y=None):
+    def forward(
+        self,
+        x,
+        timesteps,
+        y: t.Optional[Tensor] = None,
+        y_embedding: t.Optional[Tensor] = None,
+    ):
         """
         Apply the model to an input batch.
         :param x: an [N x C x ...] Tensor of inputs.
@@ -750,15 +758,16 @@ class UNetModel(nn.Module):
         :return: an [N x C x ...] Tensor of outputs.
         """
 
-        assert (y is not None) == (
-            self.num_classes is not None
-        ), "must specify y if and only if the model is class-conditional"
-
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
-        if self.num_classes is not None:
-            assert y.shape == (x.shape[0],)
-            emb = emb + self.label_emb(y)
+
+        if self.class_conditional:
+            if not ((y is not None) ^ (y_embedding is not None)):
+                raise ValueError("y or y_embedding must be given but not both.")
+            if y_embedding is None:
+                y_embedding = self.label_emb(y)
+            emb = emb + y_embedding
+
         h = x.type(self.dtype)
         for module in self.input_blocks:
             h = module(h, emb)
@@ -769,6 +778,10 @@ class UNetModel(nn.Module):
             h = module(h, emb)
         h = h.type(x.dtype)
         return self.out(h)
+
+    @property
+    def class_conditional(self):
+        return self.num_classes is not None
 
 
 def UNetBig(

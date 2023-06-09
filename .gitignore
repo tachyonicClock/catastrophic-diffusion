@@ -1,3 +1,5 @@
 trained_models/*
 sampled_images/*
 **/__pycache__/**
+.aim
+.artifacts

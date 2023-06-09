@@ -140,7 +140,9 @@ class GaussianDiffusion:
             self.alpha_bar_scheduler, timesteps, self.device, new_betas
         )
 
-        for i, j in zip(np.arange(timesteps)[::-1], new_timesteps[::-1]):
+        for i, j in zip(
+            tqdm(np.arange(timesteps)[::-1], desc="Sampling"), new_timesteps[::-1]
+        ):
             with torch.no_grad():
                 current_t = torch.tensor([j] * len(final), device=final.device)
                 current_sub_t = torch.tensor([i] * len(final), device=final.device)
@@ -197,7 +199,14 @@ class loss_logger:
 
 
 def train_one_epoch(
-    model, dataloader, diffusion, optimizer, logger, lrs, args, ema_state_dict
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    diffusion: GaussianDiffusion,
+    optimizer: torch.optim.Optimizer,
+    logger: t.Any,
+    lrs: t.Optional[torch.optim.lr_scheduler._LRScheduler],
+    args: Arguments,
+    ema_state_dict,
 ):
     model.train()
     for step, (images, labels) in enumerate(dataloader):
@@ -268,52 +277,95 @@ def sample_N_images(
     if args.local_rank > 0:
         num_processes, group = dist.get_world_size(), dist.group.WORLD
 
-    with tqdm(total=math.ceil(N / (args.batch_size * num_processes))) as pbar:
-        while num_samples < N:
-            if xT is None:
-                xT = (
-                    torch.randn(batch_size, num_channels, image_size, image_size)
-                    .float()
-                    .to(args.device)
-                )
-            if args.class_cond:
-                y = torch.randint(num_classes, (len(xT),), dtype=torch.int64).to(
-                    args.device
-                )
-            else:
-                y = None
-            gen_images = diffusion.sample_from_reverse_process(
-                model, xT, sampling_steps, {"y": y}, args.ddim
+    while num_samples < N:
+        if xT is None:
+            xT = (
+                torch.randn(batch_size, num_channels, image_size, image_size)
+                .float()
+                .to(args.device)
             )
-            samples_list = [torch.zeros_like(gen_images) for _ in range(num_processes)]
-            if args.class_cond:
-                labels_list = [torch.zeros_like(y) for _ in range(num_processes)]
-
-                if group is None:
-                    labels_list = [y]
-                    labels.append(y.detach().cpu().numpy())
-                else:
-                    dist.all_gather(labels_list, y, group)
-                    labels.append(torch.cat(labels_list).detach().cpu().numpy())
+        if args.class_cond and num_classes is not None:
+            y = torch.randint(num_classes, (len(xT),), dtype=torch.int64).to(
+                args.device
+            )
+        else:
+            y = None
+        gen_images = diffusion.sample_from_reverse_process(
+            model, xT, sampling_steps, {"y": y}, args.ddim
+        )
+        samples_list = [torch.zeros_like(gen_images) for _ in range(num_processes)]
+        if args.class_cond and y is not None:
+            labels_list = [torch.zeros_like(y) for _ in range(num_processes)]
 
             if group is None:
-                samples_list = [gen_images]
+                labels_list = [y]
+                labels.append(y.detach().cpu().numpy())
             else:
-                dist.all_gather(samples_list, gen_images, group)
+                dist.all_gather(labels_list, y, group)
+                labels.append(torch.cat(labels_list).detach().cpu().numpy())
 
-            samples.append(torch.cat(samples_list).detach().cpu().numpy())
-            num_samples += len(xT) * num_processes
-            pbar.update(1)
+        if group is None:
+            samples_list = [gen_images]
+        else:
+            dist.all_gather(samples_list, gen_images, group)
+
+        samples.append(torch.cat(samples_list).detach().cpu().numpy())
+        num_samples += len(xT) * num_processes
     samples = np.concatenate(samples).transpose(0, 2, 3, 1)[:N]
     samples = (127.5 * (samples + 1)).astype(np.uint8)
     return (samples, np.concatenate(labels) if args.class_cond else None)
+
+
+def sample_N(
+    N: int,
+    model: unets.UNetModel,
+    diffusion: GaussianDiffusion,
+    device: torch.device,
+    y: torch.Tensor,
+    xT: t.Optional[torch.Tensor] = None,
+    sampling_steps: int = 250,
+    num_channels: int = 3,
+    image_size: int = 32,
+):
+    """use this function to sample any number of images from a given
+        diffusion model and diffusion process.
+
+    Args:
+        N : Number of images
+        model : Diffusion model
+        diffusion : Diffusion process
+        xT : Starting instantiation of noise vector.
+        sampling_steps : Number of sampling steps.
+        batch_size : Batch-size for sampling.
+        num_channels : Number of channels in the image.
+        image_size : Image size (assuming square images).
+        num_classes : Number of classes in the dataset (needed for
+                     class-conditioned models)
+        args : All args from the argparser.
+
+    Returns: Numpy array with N images and corresponding labels.
+    """
+    samples, num_samples = [], 0
+    N = len(xT) if xT is not None else N
+
+    if xT is None:
+        x = torch.randn(N, num_channels, image_size, image_size)
+        x = x.to(device)
+    else:
+        x = xT[num_samples : num_samples + N]
+
+    gen_images = diffusion.sample_from_reverse_process(
+        model, x, sampling_steps, {"y": y}, False
+    )
+
+    samples.append(gen_images.detach().cpu())
+    return torch.cat(samples)
 
 
 def main():
     args = Arguments().parse_args()
 
     metadata = get_metadata(args.dataset)
-    torch.backends.cudnn.benchmark = True
 
     args.device = args.device or "cuda:{}".format(args.local_rank)
 
@@ -323,8 +375,10 @@ def main():
     if args.local_rank == 0:
         print(args)
 
+    print(metadata)
+
     # Creat model and diffusion process
-    model = unets.__dict__[args.arch](
+    model: unets.UNetModel = unets.__dict__[args.arch](
         image_size=metadata.image_size,
         in_channels=metadata.num_channels,
         out_channels=metadata.num_channels,
@@ -350,6 +404,11 @@ def main():
                     + f"doesn't match with shape in model ({dm[k].shape})"
                 )
                 del d[k]
+
+        if dm["label_emb.weight"].shape != d["label_emb.weight"].shape:
+            # Shape mismatch for label embedding. Reinitialize it.
+            d["label_emb.weight"] = model.label_emb.weight
+
         model.load_state_dict(d, strict=False)
         print(
             "Mismatched keys in ckpt and model: ",
@@ -380,6 +439,7 @@ def main():
             metadata.image_size,
             metadata.num_classes,
         )
+
         np.savez(
             os.path.join(
                 args.save_samples,

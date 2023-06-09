@@ -127,6 +127,7 @@ def get_dataset(name, data_dir, metadata):
                 transforms.ToTensor(),
             ]
         )
+        print(data_dir)
         train_set = datasets.ImageFolder(
             data_dir,
             transform=transform_train,
