@@ -321,7 +321,7 @@ def sample_N(
     model: unets.UNetModel,
     diffusion: GaussianDiffusion,
     device: torch.device,
-    y: torch.Tensor,
+    y_embedding: torch.Tensor,
     xT: t.Optional[torch.Tensor] = None,
     sampling_steps: int = 250,
     num_channels: int = 3,
@@ -355,7 +355,7 @@ def sample_N(
         x = xT[num_samples : num_samples + N]
 
     gen_images = diffusion.sample_from_reverse_process(
-        model, x, sampling_steps, {"y": y}, False
+        model, x, sampling_steps, {"y_embedding": y_embedding}, False
     )
 
     samples.append(gen_images.detach().cpu())
